@@ -556,44 +556,44 @@ class VLAFlowMatching(nn.Module):
         self.config = config
 
         self.vlm_with_expert = SmolVLMWithExpertModel(
-            model_id=self.config.vlm_model_name,
-            freeze_vision_encoder=self.config.freeze_vision_encoder,
-            train_expert_only=self.config.train_expert_only,
-            load_vlm_weights=self.config.load_vlm_weights,
-            attention_mode=self.config.attention_mode,
-            num_expert_layers=self.config.num_expert_layers,
-            num_vlm_layers=self.config.num_vlm_layers,
-            self_attn_every_n_layers=self.config.self_attn_every_n_layers,
-            expert_width_multiplier=self.config.expert_width_multiplier,
+            model_id=self.config.vlm_model_name,                                        # "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+            freeze_vision_encoder=self.config.freeze_vision_encoder,                    # True
+            train_expert_only=self.config.train_expert_only,                            # True  
+            load_vlm_weights=self.config.load_vlm_weights,                              # Set to False in case of training the expert from scratch. True when init from pretrained SmolVLA weights
+            attention_mode=self.config.attention_mode,                                  # "cross_attn"
+            num_expert_layers=self.config.num_expert_layers,                            # -1 # Less or equal to 0 is the default where the action expert has the same number of layers of VLM. Otherwise the expert have less layers.
+            num_vlm_layers=self.config.num_vlm_layers,                                  # 16                                          
+            self_attn_every_n_layers=self.config.self_attn_every_n_layers,              # 2
+            expert_width_multiplier=self.config.expert_width_multiplier,                # 0.75
             device=self.config.device if self.config.device is not None else "auto",
         )
         self.state_proj = nn.Linear(
-            self.config.max_state_dim, self.vlm_with_expert.config.text_config.hidden_size
+            self.config.max_state_dim, self.vlm_with_expert.config.text_config.hidden_size # [32, 960]
         )
-        self.action_in_proj = nn.Linear(self.config.max_action_dim, self.vlm_with_expert.expert_hidden_size)
-        self.action_out_proj = nn.Linear(self.vlm_with_expert.expert_hidden_size, self.config.max_action_dim)
+        self.action_in_proj = nn.Linear(self.config.max_action_dim, self.vlm_with_expert.expert_hidden_size) # [32, int(960 * 0.75)]
+        self.action_out_proj = nn.Linear(self.vlm_with_expert.expert_hidden_size, self.config.max_action_dim) # [int(960 * 0.75), 32]
 
         self.action_time_mlp_in = nn.Linear(
-            self.vlm_with_expert.expert_hidden_size * 2, self.vlm_with_expert.expert_hidden_size
+            self.vlm_with_expert.expert_hidden_size * 2, self.vlm_with_expert.expert_hidden_size # [int(960 * 0.75) * 2, int(960 * 0.75)], action embedding + time embedding을 concat 후 dimension reduction
         )
         self.action_time_mlp_out = nn.Linear(
-            self.vlm_with_expert.expert_hidden_size, self.vlm_with_expert.expert_hidden_size
+            self.vlm_with_expert.expert_hidden_size, self.vlm_with_expert.expert_hidden_size # [int(960 * 0.75), int(960 * 0.75)], time + action embedding fusion MLP
         )
 
         self.set_requires_grad()
-        self.fake_image_token = self.vlm_with_expert.processor.tokenizer.fake_image_token_id
+        self.fake_image_token = self.vlm_with_expert.processor.tokenizer.fake_image_token_id # image token placeholder
         self.global_image_token = self.vlm_with_expert.processor.tokenizer.global_image_token_id
         self.global_image_start_token = torch.tensor(
             [self.fake_image_token, self.global_image_token], dtype=torch.long
         )
 
-        self.add_image_special_tokens = self.config.add_image_special_tokens
+        self.add_image_special_tokens = self.config.add_image_special_tokens # False
         self.image_end_token = torch.tensor([self.fake_image_token], dtype=torch.long)
-        self.prefix_length = self.config.prefix_length
+        self.prefix_length = self.config.prefix_length # -1 
         self.rtc_processor = rtc_processor
 
         # Compile model if requested
-        if config.compile_model:
+        if config.compile_model: # False, Whether to use torch.compile for model optimization
             torch.set_float32_matmul_precision("high")
             self.sample_actions = torch.compile(self.sample_actions, mode=config.compile_mode)
             self.forward = torch.compile(self.forward, mode=config.compile_mode)
@@ -606,6 +606,7 @@ class VLAFlowMatching(nn.Module):
             params.requires_grad = self.config.train_state_proj
 
     def sample_noise(self, shape, device):
+        # Noise는 평균이 0이고 표준편차가 1인 정규분포에서 샘플링
         noise = torch.normal(
             mean=0.0,
             std=1.0,
@@ -616,9 +617,10 @@ class VLAFlowMatching(nn.Module):
         return noise
 
     def sample_time(self, bsize, device):
+        # Time은 베타 분포에서 샘플링 
         beta_dist = torch.distributions.Beta(concentration1=1.5, concentration0=1.0)
         time_beta = beta_dist.sample((bsize,)).to(device=device, dtype=torch.float32)
-        time = time_beta * 0.999 + 0.001
+        time = time_beta * 0.999 + 0.001 # 0 근처 instability 방지
         return time
 
     def embed_prefix(
@@ -649,8 +651,8 @@ class VLAFlowMatching(nn.Module):
                 embs.append(image_start_token)
                 pad_masks.append(image_start_mask)
 
-            img_emb = self.vlm_with_expert.embed_image(img)
-            img_emb = img_emb
+            img_emb = self.vlm_with_expert.embed_image(img) # vision encoder (SigLIP)로 image embedding 
+            img_emb = img_emb # [batch_size, num_image_tokens, embedding_dim]
 
             # Normalize image embeddings
             img_emb_dim = img_emb.shape[-1]
@@ -659,10 +661,10 @@ class VLAFlowMatching(nn.Module):
             bsize, num_img_embs = img_emb.shape[:2]
             img_mask = img_mask[:, None].expand(bsize, num_img_embs)
 
-            embs.append(img_emb)
-            pad_masks.append(img_mask)
+            embs.append(img_emb)        # [[batch_size, num_image_tokens, embedding_dim]]
+            pad_masks.append(img_mask)  # [[batch_size, num_image_tokens]]
 
-            att_masks += [0] * (num_img_embs)
+            att_masks += [0] * (num_img_embs) # [0, 0, ..., 0] (0개수: num_image_tokens)
             if self.add_image_special_tokens:
                 image_end_token = (
                     self.vlm_with_expert.embed_language_tokens(
@@ -677,33 +679,33 @@ class VLAFlowMatching(nn.Module):
                 embs.append(image_end_token)
                 pad_masks.append(image_end_mask)
                 att_masks += [0] * (image_end_mask.shape[1])
-        lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens)
+        lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens) # tokenizer embedding layer로 language embedding
         # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
         lang_emb = lang_emb * math.sqrt(lang_emb_dim)
 
-        embs.append(lang_emb)
-        pad_masks.append(lang_masks)
+        embs.append(lang_emb)        # [[batch_size, num_image_tokens, embedding_dim], [batch_size, num_lang_tokens, embedding_dim]]
+        pad_masks.append(lang_masks) # [[batch_size, num_image_tokens], [batch_size, num_lang_tokens]]
 
         num_lang_embs = lang_emb.shape[1]
-        att_masks += [0] * num_lang_embs
+        att_masks += [0] * num_lang_embs # [0, 0, ..., 0] (0개수: num_image_tokens + num_lang_tokens)
 
-        state_emb = self.state_proj(state)
-        state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb
-        embs.append(state_emb)
+        state_emb = self.state_proj(state) # 32 -> 960 [batch_size, embedding_dim]
+        state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb # [batch_size, 1, embedding_dim]
+        embs.append(state_emb)      # [[batch_size, num_image_tokens, embedding_dim], [batch_size, num_lang_tokens, embedding_dim], [batch_size, 1, embedding_dim]]
         bsize = state_emb.shape[0]
         device = state_emb.device
 
         states_seq_len = state_emb.shape[1]
-        state_mask = torch.ones(bsize, states_seq_len, dtype=torch.bool, device=device)
-        pad_masks.append(state_mask)
+        state_mask = torch.ones(bsize, states_seq_len, dtype=torch.bool, device=device) # [batch_size, 1]
+        pad_masks.append(state_mask) # [[batch_size, num_image_tokens], [batch_size, num_lang_tokens], [batch_size, 1]]
 
         # Set attention masks so that image and language inputs do not attend to state or actions
-        att_masks += [1] * (states_seq_len)
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
-        att_masks = att_masks[None, :]
+        att_masks += [1] * (states_seq_len) # [0, 0, ..., 0, 1] (0개수: num_image_tokens + num_lang_tokens, 1개수: state_seq_len)
+        embs = torch.cat(embs, dim=1) # [batch_size, num_image_tokens + num_lang_tokens + 1, embedding_dim]
+        pad_masks = torch.cat(pad_masks, dim=1) # [batch_size, num_image_tokens + num_lang_tokens + 1]
+        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device) # [False, False, ..., False, True] (length: num_image_tokens + num_lang_tokens + 1)
+        att_masks = att_masks[None, :] # [1, num_image_tokens + num_lang_tokens + 1]
 
         seq_len = pad_masks.shape[1]
         if seq_len < self.prefix_length:
@@ -711,7 +713,7 @@ class VLAFlowMatching(nn.Module):
             pad_masks = pad_tensor(pad_masks, self.prefix_length, pad_value=0)
             att_masks = pad_tensor(att_masks, self.prefix_length, pad_value=0)
 
-        att_masks = att_masks.expand(bsize, -1)
+        att_masks = att_masks.expand(bsize, -1) # [batch_size, num_image_tokens + num_lang_tokens + 1]
 
         return embs, pad_masks, att_masks
 
@@ -722,7 +724,7 @@ class VLAFlowMatching(nn.Module):
         att_masks = []
 
         # Fuse timestep + action information using an MLP
-        action_emb = self.action_in_proj(noisy_actions)
+        action_emb = self.action_in_proj(noisy_actions) # 32 -> int(960 * 0.75) [batch_size, chunck_size, expert_embedding_dim]
         device = action_emb.device
         bsize = action_emb.shape[0]
         dtype = action_emb.dtype
@@ -737,25 +739,26 @@ class VLAFlowMatching(nn.Module):
         time_emb = time_emb.type(dtype=dtype)
 
         time_emb = time_emb[:, None, :].expand_as(action_emb)
-        action_time_emb = torch.cat([action_emb, time_emb], dim=2)
+        action_time_emb = torch.cat([action_emb, time_emb], dim=2) # [batch_size, chunck_size, expert_embedding_dim * 2]
 
-        action_time_emb = self.action_time_mlp_in(action_time_emb)
+        # Fuse action and time embeddings with an MLP
+        action_time_emb = self.action_time_mlp_in(action_time_emb) # [batch_size, chunck_size, expert_embedding_dim]
         action_time_emb = F.silu(action_time_emb)  # swish == silu
-        action_time_emb = self.action_time_mlp_out(action_time_emb)
+        action_time_emb = self.action_time_mlp_out(action_time_emb) # [batch_size, chunck_size, expert_embedding_dim]
 
         # Add to input tokens
-        embs.append(action_time_emb)
+        embs.append(action_time_emb) # [[batch_size, chunck_size, expert_embedding_dim]]
 
         bsize, action_time_dim = action_time_emb.shape[:2]
         action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=device)
-        pad_masks.append(action_time_mask)
+        pad_masks.append(action_time_mask) # [[batch_size, chunck_size]]
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] * self.config.chunk_size
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
+        att_masks += [1] * self.config.chunk_size # [1, 1, ..., 1] (chunk_size 개수)
+        embs = torch.cat(embs, dim=1) # [batch_size, chunk_size, expert_embedding_dim]
+        pad_masks = torch.cat(pad_masks, dim=1) # [batch_size, chunk_size]
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+        att_masks = att_masks[None, :].expand(bsize, len(att_masks)) # [batch_size, chunk_size]
         return embs, pad_masks, att_masks
 
     def forward(
@@ -776,10 +779,23 @@ class VLAFlowMatching(nn.Module):
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
 
-        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
-        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1) # [batch_size, num_image_tokens + num_language_tokens + 1 + chunk_size], 값 전부 1
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1) # [0, 0, ..., 0, 1, 1, ..., 1] (length: num_image_tokens + num_language_tokens + 1 + chunk_size)
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        '''
+        예시: pad_masks = [1, 1, 1, 1, 1, 1, 1], att_masks = [0, 0, 0, 0, 1, 1, 1]
+        att_2d_masks:
+                 0 1 2 3 | 4 5 6
+            0  [ 1 1 1 1 | 0 0 0 ]
+            1  [ 1 1 1 1 | 0 0 0 ]
+            2  [ 1 1 1 1 | 0 0 0 ]
+            3  [ 1 1 1 1 | 0 0 0 ]
+            -------------------------
+            4  [ 1 1 1 1 | 1 0 0 ]
+            5  [ 1 1 1 1 | 1 1 0 ]
+            6  [ 1 1 1 1 | 1 1 1 ]
+        '''
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
         (_, suffix_out), _ = self.vlm_with_expert.forward(
             attention_mask=att_2d_masks,
@@ -792,7 +808,7 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out[:, -self.config.chunk_size :]
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
-        v_t = self.action_out_proj(suffix_out)
+        v_t = self.action_out_proj(suffix_out) # [batch_size, chunk_size, 32]
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
@@ -828,7 +844,7 @@ class VLAFlowMatching(nn.Module):
             use_cache=self.config.use_cache,
             fill_kv_cache=True,
         )
-        num_steps = self.config.num_steps
+        num_steps = self.config.num_steps # 10
         dt = -1.0 / num_steps
 
         x_t = noise
@@ -844,6 +860,8 @@ class VLAFlowMatching(nn.Module):
                     timestep=current_timestep,
                 )
 
+            # 이전 action chunk leftover와 새로운 action chunk가 끊기지 않도록 velocity를 gradient로 보정하는 과정
+            # action의 smoothness를 높이기 위해서 도입한 과정으로, RTC가 활성화된 경우에만 적용
             if self._rtc_enabled():
                 inference_delay = kwargs.get("inference_delay")
                 prev_chunk_left_over = kwargs.get("prev_chunk_left_over")
@@ -885,6 +903,13 @@ class VLAFlowMatching(nn.Module):
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
 
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        '''
+        예시: full_att_2d_masks:
+                 0 1 2 3 | 4 5 6
+            4  [ 1 1 1 1 | 1 0 0 ]
+            5  [ 1 1 1 1 | 1 1 0 ]
+            6  [ 1 1 1 1 | 1 1 1 ]
+        '''
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
