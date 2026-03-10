@@ -528,13 +528,13 @@ def pad_tensor(tensor, max_len, pad_value=0):
 class VLAFlowMatching(nn.Module):
     """
     -yj
-    SmolVLA에서 실제로 action chunk를 생성하는 핵심 모듈.
+    SmolVLA에서 실제로 action chunk를 생성하는 핵심 모듈이다
     
-    개인적으로 이 클래스는 크게 두 부분으로 보면 이해가 쉬웠다.
+    개인적으로 이 클래스는 크게 두 부분으로 보면 되는데
     1) image / language / state 를 prefix context로 만드는 부분
-    2) noisy action을 suffix로 넣고 flow matching으로 action을 복원하는 부분
+    2) noisy action을 suffix로 넣고 flow matching으로 action을 복원하는 부분 이다
     
-    즉, 멀티모달 정보를 조건으로 해서 action trajectory를 생성하는 구조다.
+    즉 멀티모달 정보를 조건으로 해서 action trajectory를 생성하는 구조다.
     """
 
     """
@@ -566,9 +566,9 @@ class VLAFlowMatching(nn.Module):
         super().__init__()
         self.config = config
         """
-        nn.Module 초기화.
-        config를 저장해두는 건 이후 hidden size, chunk size, cache 사용 여부 같은 옵션을 계속 참조해야 하기 때문.
-        여기서부터 이 클래스는 사실상 config-driven model이라고 보면 된다.
+        nn.Module 초기화하는 부분
+        config를 저장해두는 건 이후 hidden size, chunk size, cache 사용 여부 같은 옵션을 계속 참조해야 하기 때문이다
+        여기서부터 이 클래스는 사실상 config-driven model이라고 보면 된다
         
         """
 
@@ -586,24 +586,18 @@ class VLAFlowMatching(nn.Module):
         )
 
         """
-        이 부분이 backbone 생성.
-
-        단순히 vision-language model만 쓰는 게 아니라 이름 그대로 VLM + expert 구조를 가져온다.
-
-        train_expert_only, freeze_vision_encoder 같은 옵션을 보면, 이 모델은 처음부터 “전체를 다 학습할 수도 있고 일부만 학습할 수도 있게” 설계돼 있다.
-
-        즉, pretrained VLM을 활용하면서 action generation 관련 부분만 학습시키려는 의도가 보인다.
-        
+        이 부분이 backbone 생성하는 부분인데
+        단순히 vision-language model만 쓰는 게 아니라 이름 그대로 VLM + expert 구조를 가져온다
+        train_expert_only, freeze_vision_encoder 같은 옵션을 보면 이 모델은 처음부터 “전체를 다 학습할 수도 있고 일부만 학습할 수도 있게” 설계되어있다
+        즉, pretrained VLM을 활용하면서 action generation 관련 부분만 학습시키려는 의도가 보인다
         """
         
         self.state_proj = nn.Linear(
             self.config.max_state_dim, self.vlm_with_expert.config.text_config.hidden_size
         )
         """
-        robot state는 원래 text/image token hidden size와 다르니까 projection이 필요하다.
-
-        결국 state도 prefix sequence 안에 token처럼 들어가야 하므로 hidden dimension을 맞춰주는 역할.
-
+        robot state는 원래 text/image token hidden size와 다르니까 projection이 필요하다
+        결국 state도 prefix sequence 안에 token처럼 들어가야 하므로 hidden dimension을 맞춰주는 역할이다
         내 기준으로 이 줄은 “state를 transformer world에 넣기 위한 adapter”라고 보면 편했다.
         
         """
@@ -613,32 +607,23 @@ class VLAFlowMatching(nn.Module):
         self.action_in_proj = nn.Linear(self.config.max_action_dim, self.vlm_with_expert.expert_hidden_size)
 
         """
-        noisy action을 expert hidden size로 바꾸는 projection.
-
-        action도 결국 suffix token처럼 transformer/expert에 들어가야 해서 dim alignment가 필요하다.
-
-        raw action vector → expert token embedding이라고 이해하면 된다.
-        
+        noisy action을 expert hidden size로 바꾸는 projection이다
+        action도 결국 suffix token처럼 transformer/expert에 들어가야 해서 dim alignment가 필요하다
+        raw action vector → expert token embedding이라고 이해하면 된다
         """
-
 
         self.action_out_proj = nn.Linear(self.vlm_with_expert.expert_hidden_size, self.config.max_action_dim)
         """
-        반대로 expert output을 다시 action dimension으로 돌려놓는 projection.
-
-        여기서 나오는 값은 최종 clean action 자체라기보다 학습 시에는 velocity field v_t prediction 역할을 한다.
-        
+        반대로 expert output을 다시 action dimension으로 돌려놓는 projection이다
+        여기서 나오는 값은 최종 clean action 자체라기보다 학습 시에는 velocity field v_t prediction 역할을 한다
         """
-
-
 
         self.action_time_mlp_in = nn.Linear(
             self.vlm_with_expert.expert_hidden_size * 2, self.vlm_with_expert.expert_hidden_size
         )
         """
-        action embedding이랑 timestep embedding을 concat할 거라서 입력 차원이 2 * hidden.
-
-        둘을 단순 더하기가 아니라 concat 후 MLP로 섞는 구조라서, time 정보를 좀 더 명시적으로 fusion하려는 느낌이다.
+        action embedding이랑 timestep embedding을 concat할 거라서 입력 차원이 2 * hidden이다
+        둘을 단순 더하기가 아니라 concat 후 MLP로 섞는 구조라서 time 정보를 좀 더 명시적으로 fusion하려는 느낌
         """
 
 
@@ -646,12 +631,9 @@ class VLAFlowMatching(nn.Module):
             self.vlm_with_expert.expert_hidden_size, self.vlm_with_expert.expert_hidden_size
         )
         """
-        위 MLP의 두 번째 linear layer.
-
-        action/time fusion representation을 expert input dimension에 맞게 정리해주는 역할.
-
-        diffusion/flow 모델에서 timestep conditioning이 중요하다는 점을 반영한 부분.
-        
+        위 MLP의 두 번째 linear layer
+        action/time fusion representation을 expert input dimension에 맞게 정리해주는 역할
+        diffusion/flow 모델에서 timestep conditioning이 중요하다는 점을 반영한 부분
         """
 
 
@@ -1438,6 +1420,10 @@ class VLAFlowMatching(nn.Module):
         timestep,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
+        """
+        inference 중 한 스텝만 수행하는 함수이다. 현재 noisy action x_t를 넣으면 현재 timestep의 velocity v_t를 예측한다
+        """
+
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep)
 
         suffix_len = suffix_pad_masks.shape[1]
