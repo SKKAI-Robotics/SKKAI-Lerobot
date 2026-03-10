@@ -639,46 +639,38 @@ class VLAFlowMatching(nn.Module):
 
         self.set_requires_grad()
         """
-        특정 모듈의 gradient on/off를 config에 맞게 적용.
-
-        지금 코드상으로는 state_proj 쪽을 주로 제어한다.
-
-        작은 adapter만 선택적으로 학습하려는 실험에도 대응 가능해 보인다.
+        특정 모듈의 gradient on/off를 config에 맞게 적용
+        지금 코드상으로는 state_proj 쪽을 주로 제어한다
+        작은 adapter만 선택적으로 학습하려는 실험에도 대응 가능해 보인다
         """
 
 
         self.fake_image_token = self.vlm_with_expert.processor.tokenizer.fake_image_token_id
         self.global_image_token = self.vlm_with_expert.processor.tokenizer.global_image_token_id
         """
-        image special token id를 tokenizer에서 가져온다.
-
-        image를 그냥 dense embedding으로만 넣는 게 아니라, language sequence와 섞일 수 있게 special token 체계를 활용한다는 뜻.
+        image special token id를 tokenizer에서 가져온다
+        image를 그냥 dense embedding으로만 넣는 게 아니라, language sequence와 섞일 수 있게 special token 체계를 활용한다는 뜻
         """
 
         self.global_image_start_token = torch.tensor(
             [self.fake_image_token, self.global_image_token], dtype=torch.long
         )
         """
-        이미지 시작을 나타내는 토큰 시퀀스.
-
-        이미지 embedding 앞에 붙여서 “여기부터 이미지 관련 정보”라는 boundary를 만들어주는 역할.
+        이미지 시작을 나타내는 토큰 sequence
+        이미지 embedding 앞에 붙여서 “여기부터 이미지 관련 정보”라는 boundary를 만들어주는 역할
         """
 
         self.add_image_special_tokens = self.config.add_image_special_tokens
         """
-        이 special token을 실제로 넣을지 말지를 config로 결정.
-
-        실험에 따라 성능 비교하려고 옵션화해둔 것 같음.
+        이 special token을 실제로 넣을지 말지를 config로 결정
+        실험에 따라 성능 비교하려고 옵션화를 해둔 느낌
         """
-
 
         self.image_end_token = torch.tensor([self.fake_image_token], dtype=torch.long)
         """
-        image 끝 boundary 역할.
-
-        시작과 끝을 둘 다 명시해서 multimodal token stream을 더 구조적으로 만들려는 의도.
+        image 끝 boundary 역할이다
+        시작과 끝을 둘 다 명시해서 multimodal token stream을 더 구조적으로 만들려는 의도
         """
-
 
         self.prefix_length = self.config.prefix_length
         self.rtc_processor = rtc_processor
@@ -709,7 +701,6 @@ class VLAFlowMatching(nn.Module):
     
     """
     RTC(real-time constraint) 기능이 실제로 켜져 있는지 확인
-
     뒤에서 inference denoising step을 일반 방식으로 할지 RTC 방식으로 할지 분기할 때 사용
     """
 
@@ -719,11 +710,8 @@ class VLAFlowMatching(nn.Module):
     
     """
     state_proj만 별도로 학습할지 말지 정한다
-
     즉 state encoder adapter를 튜닝할지 freeze할지 결정하는 줄
-
     개인적으로는 “전체 backbone은 건드리지 않더라도 state 쪽만 조정해볼 수 있게 해둔 장치”로 보였다
-    
     """
 
     def sample_noise(self, shape, device):
@@ -738,7 +726,6 @@ class VLAFlowMatching(nn.Module):
     
     """
     표준 Gaussian noise 샘플링(flow matching / diffusion 계열에서 시작점이 되는 noise 생성)
-
     inference에서는 이 noise에서 출발해서 action으로 가고, training에서는 clean action과 섞어서 x_t를 만든다
     """
 
@@ -746,18 +733,15 @@ class VLAFlowMatching(nn.Module):
         beta_dist = torch.distributions.Beta(concentration1=1.5, concentration0=1.0)
         """
         uniform이 아니라 Beta 분포에서 timestep 샘플링
-
         Beta(1.5, 1.0)이면 완전 균등은 아니고 약간 한쪽으로 치우친 샘플링이 된다
-
         학습에서 특정 time 구간을 조금 더 자주 보게 하려는 의도가 있을 수 있다
         """
+
         time_beta = beta_dist.sample((bsize,)).to(device=device, dtype=torch.float32)
         time = time_beta * 0.999 + 0.001
         """
-        정확히 0이나 1이 안 되도록 살짝 shift.
-
+        정확히 0이나 1이 안 되도록 살짝 shift
         t=0, t=1은 너무 극단이라 수치적으로 애매하거나 학습이 너무 쉬워질 수 있어서 피하는 느낌
-
         즉 time range를 거의 [0,1]이지만 완전 끝점은 제외하는 방식
         """
 
@@ -774,27 +758,22 @@ class VLAFlowMatching(nn.Module):
         """
 
         """
-        이 함수는 prefix sequence를 만드는 핵심.
-
+        이 함수는 prefix sequence를 만드는 핵심
         prefix = image + language + state
-
-        나중에 action suffix가 이 prefix를 condition으로 보게 된다.
+        나중에 action suffix가 이 prefix를 condition으로 보게 된다
         """
+
+
         embs = []
         pad_masks = []
         att_masks = []
         """
         각각
-
         embs: 실제 embedding token들
-
         pad_masks: padding 여부
-
         att_masks: attention block 구조를 만들기 위한 마스크용 정보
-
-        나중에 합쳐서 전체 transformer input으로 사용.
+        나중에 합쳐서 전체 transformer input으로 사용
         """
-
 
         for _img_idx, (
             img,
@@ -802,13 +781,12 @@ class VLAFlowMatching(nn.Module):
         ) in enumerate(zip(images, img_masks, strict=False)):
             """
             카메라가 여러 개일 수 있어서 image마다 반복
-
             strict=False는 두 iterable 길이가 완전히 같지 않아도 에러를 피하려는 선택
             """
 
             if self.add_image_special_tokens: 
                 """
-                config에서 허용한 경우에만 이미지 시작/끝 토큰을 붙인다."""
+                config에서 허용한 경우에만 이미지 시작/끝 토큰을 붙인다"""
                 image_start_token = (
                     self.vlm_with_expert.embed_language_tokens(
                         self.global_image_start_token.to(device=self.vlm_with_expert.vlm.device)
@@ -817,11 +795,9 @@ class VLAFlowMatching(nn.Module):
                     .expand(img.shape[0], -1, -1)
                 )
                 """
-                image start token도 결국 language embedding layer를 통과시켜 hidden vector로 만든다.
-
-                그리고 batch size만큼 expand.
-
-                즉 special token도 일반 token embedding처럼 다뤄서 multimodal sequence에 자연스럽게 끼워 넣는다.
+                image start token도 결국 language embedding layer를 통과시켜 hidden vector로 만든다
+                그리고 batch size만큼 expand
+                즉 special token도 일반 token embedding처럼 다뤄서 multimodal sequence에 자연스럽게 끼워 넣는다
                 """
 
                 image_start_mask = torch.ones_like(
@@ -833,9 +809,8 @@ class VLAFlowMatching(nn.Module):
 
                 att_masks += [0] * (image_start_mask.shape[-1])
                 """
-                attention block 관점에서 이 토큰들은 prefix의 앞부분에 속한다는 표시.
-
-                뒤에서 make_att_2d_masks 할 때 cumulative 구조로 block attention이 형성된다.
+                attention block 관점에서 이 토큰들은 prefix의 앞부분에 속한다는 표시
+                뒤에서 make_att_2d_masks 할 때 cumulative 구조로 block attention이 형성된다
                 """
 
                 embs.append(image_start_token)
@@ -857,7 +832,7 @@ class VLAFlowMatching(nn.Module):
             embedding scale 조정하는 부분
             일반 transformer token embedding에서 hidden dim의 sqrt로 scale 맞추는 패턴과 유사하다
 
-            image embedding magnitude를 language embedding과 어느 정도 맞춰주려는 의미로 보인다.
+            image embedding magnitude를 language embedding과 어느 정도 맞춰주려는 의미로 보인다
             """
 
             bsize, num_img_embs = img_emb.shape[:2]
@@ -1425,17 +1400,46 @@ class VLAFlowMatching(nn.Module):
         """
 
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep)
+        """
+        현재 noisy action과 timestep을 suffix token sequence로 변환
+        """
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
         prefix_len = prefix_pad_masks.shape[1]
+        """
+        attention mask 조립할 때 필요한 길이 정보
+        """
+
         prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
+        """
+        suffix token들이 prefix token을 볼 수 있도록 prefix-side attention mask를 2D로 확장
+        쉽게 말하면 “현재 action token이 모든 유효 prefix token을 condition으로 참조 가능하게” 만드는 부분
+        """
 
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+        """
+        suffix 내부 attention 구조 생성, suffix token끼리 어떤 block/causal 관계를 가질지 여기서 정해진다
+        """
 
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+        """
+        최종 attention mask(앞쪽은 prefix 참조용 뒤쪽은 suffix 내부 참조용)
+        즉 suffix token은 prefix + suffix 일부를 함께 볼 수 있다
+        """
+
+
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        """
+        prefix에 실제 valid token이 몇 개 있는지 계산 + suffix position id를 prefix 뒤에서 이어 붙이기 위한 offset
+        """
+
+
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+        """
+        suffix token들의 absolute position id 생성
+        prefix 뒤를 이어 받도록 설계.
+        """
 
         outputs_embeds, _ = self.vlm_with_expert.forward(
             attention_mask=full_att_2d_masks,
@@ -1445,8 +1449,37 @@ class VLAFlowMatching(nn.Module):
             use_cache=self.config.use_cache,
             fill_kv_cache=False,
         )
+        """
+        prefix는 이미 KV cache에 있으므로 여기서는 suffix만 새로 넣는다
+        이게 inference 효율의 핵심
+        매 스텝마다 prefix를 다시 계산하지 않아도 된다.
+        """
+
         suffix_out = outputs_embeds[1]
+        """
+        forward 결과 중 suffix branch output을 가져옴
+        """
+
         suffix_out = suffix_out[:, -self.config.chunk_size :]
+        """
+        필요한 action chunk 길이만 유지
+        """
+
         suffix_out = suffix_out.to(dtype=torch.float32)
+        """
+        최종 projection 안정성을 위해 float32로 변환
+        """
+
+
         v_t = self.action_out_proj(suffix_out)
+        """
+        hidden → action velocity projection
+        현재 timestep의 denoising 방향을 나타내는 v_t 생성
+        """
+
         return v_t
+    
+    """
+    한 스텝 분의 velocity field 반환.
+    이후 sample_actions에서 x_t = x_t + dt * v_t 업데이트에 사용된다.
+    """
