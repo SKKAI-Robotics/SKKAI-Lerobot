@@ -221,7 +221,8 @@ def aloha_gripper_from_angular_inv(value):
     return normalize(value, min_val=0.4, max_val=1.5)
 
 
-class SmolVLAPolicy(PreTrainedPolicy):
+class SmolVLAPolicy(PreTrainedPolicy): 
+    """ pretrained policy class 상속 받음 VLAFlowMatching model 을 lerobot framework 에서 사용하기 위한 wrapper class """
     """Wrapper class around VLAFlowMatching model to train and run inference within LeRobot."""
 
     config_class = SmolVLAConfig
@@ -240,18 +241,18 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         super().__init__(config)
         config.validate_features()
-        self.config = config
-        self.init_rtc_processor()
-        self.model = VLAFlowMatching(config, rtc_processor=self.rtc_processor)
-        self.reset()
+        self.config = config # config 을 클래스 변수로 저장
+        self.init_rtc_processor() # RTC processor 를 초기화
+        self.model = VLAFlowMatching(config, rtc_processor=self.rtc_processor) # VLAFlowMatching model 을 초기화
+        self.reset() # action queue 를 초기화
 
     def reset(self):
         """This should be called whenever the environment is reset."""
         self._queues = {
             ACTION: deque(maxlen=self.config.n_action_steps),
-        }
+        } # action queue 를 초기화
 
-    def init_rtc_processor(self):
+    def init_rtc_processor(self): # Real-Time Control (RTC) processor 를 초기화
         """Initialize RTC processor if RTC is enabled in config."""
         self.rtc_processor = None
 
@@ -278,6 +279,14 @@ class SmolVLAPolicy(PreTrainedPolicy):
         # In the case of offline inference, we have the action in the batch
         # that why without the k != ACTION check, it will raise an error because we are trying to stack
         # on an empty container.
+        
+        """
+        batch 에 있는 모든 키를 순회하며, 키가 _queues 에 있고 ACTION 이 아닌 경우, 키에 해당하는 값을 stack 하여 배치로 변환
+        이후에 이미지, 상태, 언어 토큰, 언어 마스크를 준비하고, VLAFlowMatching model 을 사용하여 액션을 생성
+        이후에 액션을 언패딩하고, Aloha 변환을 적용
+        이후에 액션을 반환
+        """
+
         for k in batch:
             if k in self._queues and k != ACTION:
                 batch[k] = torch.stack(list(self._queues[k]), dim=1)
@@ -313,9 +322,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self.eval()
 
         batch = self._prepare_batch(batch)
-        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
+        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION]) # action queue 를 업데이트
 
-        actions = self._get_action_chunk(batch, noise, **kwargs)
+        actions = self._get_action_chunk(batch, noise, **kwargs) # 액션을 생성
         return actions
 
     @torch.no_grad()
@@ -328,17 +337,23 @@ class SmolVLAPolicy(PreTrainedPolicy):
         environment. It works by managing the actions in a queue and only calling `select_actions` when the
         queue is empty.
         """
+        """
+        RTC 가 활성화되어 있지 않은 경우, 오류를 발생시킴
+        이후에 평가 모드로 전환하고, 배치를 전처리하고, action queue 를 업데이트
+        이후에 큐가 비어있으면 새 액션을 생성하고 (n_action_steps, batch_size, action_dim), 큐에 추가
+        이후에 큐에서 하나를 꺼내서 (batch_size, action_dim) 으로 반환
+        """
 
         assert not self._rtc_enabled(), (
             "RTC is not supported for select_action, use it with predict_action_chunk"
         )
 
         self.eval()
-        batch = self._prepare_batch(batch)
-        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
+        batch = self._prepare_batch(batch) # 배치를 전처리
+        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION]) # action queue 를 업데이트
 
         if self._check_get_actions_condition():
-            actions = self._get_action_chunk(batch, noise)
+            actions = self._get_action_chunk(batch, noise) # 액션을 생성            
 
             # `self.predict_action_chunk` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
@@ -365,37 +380,42 @@ class SmolVLAPolicy(PreTrainedPolicy):
                 - "mean": Return scalar mean loss (default, backward compatible)
                 - "none": Return per-sample losses of shape (batch_size,) for RA-BC weighting
         """
-        if self.config.adapt_to_pi_aloha:
+        """
+        Aloha 모드일 때, 상태를 SmolVLA 형식으로 변환하고, 액션을 Aloha 형식으로 변환
+        이후에 이미지, 상태, 언어 토큰, 언어 마스크, 액션을 준비하고, VLAFlowMatching model 을 사용하여 손실을 계산
+        이후에 손실을 반환
+        """
+        if self.config.adapt_to_pi_aloha: # Aloha 모드일 때, 상태를 SmolVLA 형식으로 변환하고, 액션을 Aloha 형식으로 변환
             batch[OBS_STATE] = self._pi_aloha_decode_state(batch[OBS_STATE])
             batch[ACTION] = self._pi_aloha_encode_actions_inv(batch[ACTION])
 
-        images, img_masks = self.prepare_images(batch)
-        state = self.prepare_state(batch)
-        lang_tokens = batch[f"{OBS_LANGUAGE_TOKENS}"]
-        lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
-        actions = self.prepare_action(batch)
+        images, img_masks = self.prepare_images(batch) # 이미지, 이미지 마스크를 준비
+        state = self.prepare_state(batch) # 상태를 준비
+        lang_tokens = batch[f"{OBS_LANGUAGE_TOKENS}"] # 언어 토큰을 준비
+        lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"] # 언어 마스크를 준비
+        actions = self.prepare_action(batch) # 액션을 준비
         actions_is_pad = batch.get("actions_id_pad")
-        loss_dict = {}
-        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        loss_dict = {} # 손실 딕셔너리를 초기화
+        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time) # VLAFlowMatching model 을 사용하여 손실을 계산
         loss_dict["losses_after_forward"] = losses.clone().mean().item()
 
         if actions_is_pad is not None:
-            in_episode_bound = ~actions_is_pad
-            losses = losses * in_episode_bound.unsqueeze(-1)
-            loss_dict["losses_after_in_ep_bound"] = losses.clone().mean().item()
+            in_episode_bound = ~actions_is_pad # 액션이 패딩된 경우, 손실을 0으로 설정
+            losses = losses * in_episode_bound.unsqueeze(-1) 
+            loss_dict["losses_after_in_ep_bound"] = losses.clone().mean().item() # 에피소드 내부만 손실을 계산
 
         # Remove padding
-        losses = losses[:, :, : self.config.max_action_dim]
+        losses = losses[:, :, : self.config.max_action_dim] # 패딩을 제거
         loss_dict["losses_after_rm_padding"] = losses.clone().mean().item()
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
-            per_sample_loss = losses.mean(dim=(1, 2))
+            per_sample_loss = losses.mean(dim=(1, 2)) # 샘플별 손실을 계산
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
         else:
             # Default: return scalar mean loss
-            loss = losses.mean()
+            loss = losses.mean() # 스칼라 평균 손실을 계산  
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
 
@@ -403,45 +423,49 @@ class SmolVLAPolicy(PreTrainedPolicy):
         """Apply SmolVLA preprocessing to the images, like resizing to 224x224 and padding to keep aspect ratio, and
         convert pixel range from [0.0, 1.0] to [-1.0, 1.0] as requested by SigLIP.
         """
-        images = []
-        img_masks = []
-        present_img_keys = [key for key in self.config.image_features if key in batch]
-        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+        images = [] # 이미지 리스트를 초기화    
+        img_masks = [] # 이미지 마스크 리스트를 초기화
+        present_img_keys = [key for key in self.config.image_features if key in batch] # 배치에 있는 이미지 키를 추출
+        missing_img_keys = [key for key in self.config.image_features if key not in batch] # 배치에 없는 이미지 키를 추출
 
         if len(present_img_keys) == 0:
-            raise ValueError(
+            raise ValueError( # 이미지 키가 없는 경우, 오류를 발생시킴
                 f"All image features are missing from the batch. At least one expected. (batch: {batch.keys()}) (image_features:{self.config.image_features})"
             )
         # Preprocess image features present in the batch
-        for key in present_img_keys:
+        for key in present_img_keys: # 배치에 있는 이미지 키를 순회하며, 이미지를 전처리
             img = batch[key][:, -1, :, :, :] if batch[key].ndim == 5 else batch[key]
             if self.config.resize_imgs_with_padding is not None:
-                img = resize_with_pad(img, *self.config.resize_imgs_with_padding, pad_value=0)
+                img = resize_with_pad(img, *self.config.resize_imgs_with_padding, pad_value=0) # 이미지를 리사이즈하고, 패딩을 추가
 
             # Normalize from range [0,1] to [-1,1] as expacted by siglip
-            img = img * 2.0 - 1.0
+            img = img * 2.0 - 1.0 # 이미지를 정규화
 
-            bsize = img.shape[0]
+            bsize = img.shape[0] # 배치 크기를 추출
             device = img.device
             if f"{key}_padding_mask" in batch:
-                mask = batch[f"{key}_padding_mask"].bool()
+                mask = batch[f"{key}_padding_mask"].bool() # 이미지 마스크를 추출
             else:
-                mask = torch.ones(bsize, dtype=torch.bool, device=device)
-            images.append(img)
-            img_masks.append(mask)
+                mask = torch.ones(bsize, dtype=torch.bool, device=device) # 이미지 마스크를 생성
+            images.append(img) # 이미지를 추가
+            img_masks.append(mask) # 이미지 마스크를 추가
 
         # Create image features not present in the batch
         # as fully 0 padded images.
-        for num_empty_cameras in range(len(missing_img_keys)):
+        for num_empty_cameras in range(len(missing_img_keys)):# 배치에 없는 이미지 키를 순회하며, 이미지를 전처리
             if num_empty_cameras >= self.config.empty_cameras:
                 break
-            img = torch.ones_like(img) * -1
-            mask = torch.zeros_like(mask)
-            images.append(img)
-            img_masks.append(mask)
-        return images, img_masks
+            img = torch.ones_like(img) * -1 # 이미지를 생성
+            mask = torch.zeros_like(mask) # 이미지 마스크를 생성
+            images.append(img) # 이미지를 추가
+            img_masks.append(mask) # 이미지 마스크를 추가
+        return images, img_masks # 이미지, 이미지 마스크를 반환
 
-    def _pi_aloha_decode_state(self, state):
+    def _pi_aloha_decode_state(self, state): # Aloha 모드일 때, 상태를 SmolVLA 형식으로 변환
+        """
+        Aloha 모드일 때, 상태를 SmolVLA 형식으로 변환
+        이후에 상태를 반환
+        """
         # Flip the joints.
         for motor_idx in [1, 2, 8, 9]:
             state[:, motor_idx] *= -1
