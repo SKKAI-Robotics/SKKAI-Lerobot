@@ -676,9 +676,7 @@ class VLAFlowMatching(nn.Module):
         self.rtc_processor = rtc_processor
         """
         prefix_length: prefix sequence를 특정 길이까지 pad할 때 사용.
-
         rtc_processor: real-time constraint 관련 보정용 processor.
-
         inference 단계에서 지연이나 leftover chunk를 고려하는 분기가 뒤에 나옴.
         """
 
@@ -689,9 +687,7 @@ class VLAFlowMatching(nn.Module):
             self.forward = torch.compile(self.forward, mode=config.compile_mode)
         """
         PyTorch compile로 성능 최적화.
-
         sample_actions랑 forward 둘 다 compile하는 걸 보면, 학습과 추론 둘 다 속도 이득을 보려는 구조.
-
         특히 action generation은 iterative loop가 있어서 compile 이점이 있을 수 있다.
         """
 
@@ -711,7 +707,7 @@ class VLAFlowMatching(nn.Module):
     """
     state_proj만 별도로 학습할지 말지 정한다
     즉 state encoder adapter를 튜닝할지 freeze할지 결정하는 줄
-    개인적으로는 “전체 backbone은 건드리지 않더라도 state 쪽만 조정해볼 수 있게 해둔 장치”로 보였다
+    개인적으로는 전체 backbone은 건드리지 않더라도 state 쪽만 조정해볼 수 있게 해둔 장치 느낌
     """
 
     def sample_noise(self, shape, device):
@@ -867,7 +863,6 @@ class VLAFlowMatching(nn.Module):
                 )
                 """
                 end token도 language embedding 방식으로 hidden vector화
-
                 이미지 시작과 동일한 처리 흐름
                 """
 
@@ -895,7 +890,6 @@ class VLAFlowMatching(nn.Module):
         lang_emb = lang_emb * math.sqrt(lang_emb_dim)
         """
         language embedding도 scaling 적용함
-
         image embedding과 유사하게 hidden magnitude를 맞추는 느낌임
         """
 
@@ -916,7 +910,6 @@ class VLAFlowMatching(nn.Module):
         state_emb = self.state_proj(state)
         """
         raw robot state를 hidden dimension으로 projection.
-
         이걸 통해 state도 transformer가 읽을 수 있는 token 표현으로 바꾼다."""
 
         state_emb = state_emb[:, None, :] if state_emb.ndim == 2 else state_emb
@@ -1312,10 +1305,8 @@ class VLAFlowMatching(nn.Module):
         for step in range(num_steps):
             time = 1.0 + step * dt
             """
-            denoising loop.
-
+            denoising loop
             step=0일 때 time≈1, 마지막에는 time≈0에 가까워짐.
-
             flow trajectory를 따라 내려가는 구조.
             """
 
@@ -1334,7 +1325,7 @@ class VLAFlowMatching(nn.Module):
                     timestep=current_timestep,
                 )
             """
-            현재 timestep과 prefix cache를 고정한 채 denoise_step을 부르는 partial wrapper 느낌.
+            현재 timestep과 prefix cache를 고정한 채 denoise_step을 부르는 partial wrapper 느낌인데,
             RTC processor가 이 함수를 감싸서 사용할 수 있게 만든 구조라 이해하면 된다.
             """
 
@@ -1343,7 +1334,7 @@ class VLAFlowMatching(nn.Module):
                 prev_chunk_left_over = kwargs.get("prev_chunk_left_over")
                 execution_horizon = kwargs.get("execution_horizon")
                 """
-                RTC 모드일 때 추가 정보 가져오기.
+                RTC 모드일 때 추가 정보 가져오기
                 실시간 제어에서는 이전 chunk leftover나 실행 지연이 실제 action quality에 영향 줄 수 있어서 이런 인자가 필요해 보인다.
                 """
 
@@ -1396,7 +1387,7 @@ class VLAFlowMatching(nn.Module):
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
         """
-        inference 중 한 스텝만 수행하는 함수이다. 현재 noisy action x_t를 넣으면 현재 timestep의 velocity v_t를 예측한다
+        inference 중 한 스텝만 수행하는 함수인데, 현재 noisy actionㄴ x_t를 넣으면 현재 timestep의 velocity v_t를 예측한다
         """
 
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep)
@@ -1450,8 +1441,7 @@ class VLAFlowMatching(nn.Module):
             fill_kv_cache=False,
         )
         """
-        prefix는 이미 KV cache에 있으므로 여기서는 suffix만 새로 넣는다
-        이게 inference 효율의 핵심
+        prefix는 이미 KV cache에 있으므로 여기서는 suffix만 새로 넣
         매 스텝마다 prefix를 다시 계산하지 않아도 된다.
         """
 
@@ -1480,6 +1470,6 @@ class VLAFlowMatching(nn.Module):
         return v_t
     
     """
-    한 스텝 분의 velocity field 반환.
+    한 스텝 분의 velocity field 반환
     이후 sample_actions에서 x_t = x_t + dt * v_t 업데이트에 사용된다.
     """
