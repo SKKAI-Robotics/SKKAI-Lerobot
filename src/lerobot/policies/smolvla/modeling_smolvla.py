@@ -776,8 +776,9 @@ class VLAFlowMatching(nn.Module):
             img_mask,
         ) in enumerate(zip(images, img_masks, strict=False)):
             """
-            카메라가 여러 개일 수 있어서 image마다 반복
+            이미지가 여러 개일 수 있으므로,카메라별로 하나씩 반복해서 처리한다.
             strict=False는 두 iterable 길이가 완전히 같지 않아도 에러를 피하려는 선택
+            즉, 멀티 카메라 입력을 순차적으로 prefix에 붙이는 구조
             """
 
             if self.add_image_special_tokens: 
@@ -792,8 +793,10 @@ class VLAFlowMatching(nn.Module):
                 )
                 """
                 image start token도 결국 language embedding layer를 통과시켜 hidden vector로 만든다
+                (transformer은 vector만 처리할 수 있음)
                 그리고 batch size만큼 expand
                 즉 special token도 일반 token embedding처럼 다뤄서 multimodal sequence에 자연스럽게 끼워 넣는다
+                즉 이미지 patch embedding만 넣는 게 아니라, 필요하면 <image_start>, <image_end> 같은 경계 토큰도 붙인다.
                 """
 
                 image_start_mask = torch.ones_like(
