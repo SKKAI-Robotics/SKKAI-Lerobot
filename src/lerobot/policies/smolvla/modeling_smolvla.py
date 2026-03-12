@@ -620,7 +620,7 @@ class VLAFlowMatching(nn.Module):
         # Time은 베타 분포에서 샘플링 
         beta_dist = torch.distributions.Beta(concentration1=1.5, concentration0=1.0)
         time_beta = beta_dist.sample((bsize,)).to(device=device, dtype=torch.float32)
-        time = time_beta * 0.999 + 0.001 # 0 근처 instability 방지
+        time = time_beta * 0.999 + 0.001 # 0 근처 instability 방지, 기존 [0, 1] -> [0.001, 1.0]
         return time
 
     def embed_prefix(
@@ -766,18 +766,18 @@ class VLAFlowMatching(nn.Module):
     ) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
-            noise = self.sample_noise(actions.shape, actions.device)
+            noise = self.sample_noise(actions.shape, actions.device)       # [batch_size, chunk_size, max_action_dim], 가우시안 분포 
 
         if time is None:
-            time = self.sample_time(actions.shape[0], actions.device)
+            time = self.sample_time(actions.shape[0], actions.device)      # [batch_size], 1에 가까운 값이 더 많이 샘플링됨
 
-        time_expanded = time[:, None, None]
+        time_expanded = time[:, None, None]                                # [batch_size, 1, 1]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(            # prefix_embs
+            images, img_masks, lang_tokens, lang_masks, state=state                     # [batch_size, num_image_tokens + num_language_tokens + 1, VLM_hidden_size]
         )
-        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)  # suffix_embs: [batch_size, chunk_size, expert_hidden_size]
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1) # [batch_size, num_image_tokens + num_language_tokens + 1 + chunk_size], 값 전부 1
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1) # [0, 0, ..., 0, 1, 1, ..., 1] (length: num_image_tokens + num_language_tokens + 1 + chunk_size)
@@ -796,7 +796,7 @@ class VLAFlowMatching(nn.Module):
             5  [ 1 1 1 1 | 1 1 0 ]
             6  [ 1 1 1 1 | 1 1 1 ]
         '''
-        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1 # ex: [0, 1, 2, 3, 4, 5, 6]]
         (_, suffix_out), _ = self.vlm_with_expert.forward(
             attention_mask=att_2d_masks,
             position_ids=position_ids,
@@ -885,6 +885,7 @@ class VLAFlowMatching(nn.Module):
 
         return x_t
 
+    # ODE solver 
     def denoise_step(
         self,
         prefix_pad_masks,
@@ -911,7 +912,7 @@ class VLAFlowMatching(nn.Module):
             6  [ 1 1 1 1 | 1 1 1 ]
         '''
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
-        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1 # ex: [4, 5, 6]
 
         outputs_embeds, _ = self.vlm_with_expert.forward(
             attention_mask=full_att_2d_masks,
