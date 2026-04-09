@@ -64,6 +64,11 @@ class SmolVLAConfig(PreTrainedConfig):
 
     # Decoding
     num_steps: int = 10
+    flow_matching_scheduler: str = "constant"  # "constant" | "faster"
+    faster_alpha: float = 0.6
+    faster_first_action_hit_time: float = 0.9
+    faster_mixed_schedule_probability: float = 0.5
+    faster_max_delay: int = 10
 
     # Attention utils
     use_cache: bool = True
@@ -121,6 +126,25 @@ class SmolVLAConfig(PreTrainedConfig):
         if self.use_delta_joint_actions_aloha:
             raise NotImplementedError(
                 "`use_delta_joint_actions_aloha` is used by smolvla for aloha real models. It is not ported yet in LeRobot."
+            )
+        if self.flow_matching_scheduler not in {"constant", "faster"}:
+            raise ValueError(
+                "`flow_matching_scheduler` must be one of {'constant', 'faster'}. "
+                f"Got {self.flow_matching_scheduler}."
+            )
+        if not (0.0 <= self.faster_mixed_schedule_probability <= 1.0):
+            raise ValueError(
+                "`faster_mixed_schedule_probability` must lie in [0, 1]. "
+                f"Got {self.faster_mixed_schedule_probability}."
+            )
+        if self.faster_max_delay < 0:
+            raise ValueError(f"`faster_max_delay` must be non-negative. Got {self.faster_max_delay}.")
+        if self.faster_alpha <= 0:
+            raise ValueError(f"`faster_alpha` must be strictly positive. Got {self.faster_alpha}.")
+        if not (0.0 < self.faster_first_action_hit_time < 1.0):
+            raise ValueError(
+                "`faster_first_action_hit_time` must lie strictly between 0 and 1. "
+                f"Got {self.faster_first_action_hit_time}."
             )
 
     def validate_features(self) -> None:

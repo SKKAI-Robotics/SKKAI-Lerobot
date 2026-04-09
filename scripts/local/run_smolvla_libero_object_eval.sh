@@ -16,6 +16,7 @@ EPISODE_LENGTH=""
 N_ACTION_STEPS="1"
 SWEEP=""
 DRY_RUN="false"
+RENDER_EPISODES="0"
 
 usage() {
   cat <<'EOF'
@@ -34,6 +35,7 @@ Options:
   --episode-length <int>       Override env episode_length
   --output-root <dir>          Output root dir
   --run-id <id>                Run id suffix (default: UTC timestamp)
+  --render-episodes <int>      Number of episodes to render to mp4 (default: 0)
   --dry-run                    Print commands only
   -h, --help                   Show this help
 
@@ -67,6 +69,8 @@ while [[ $# -gt 0 ]]; do
       OUTPUT_ROOT="$2"; shift 2 ;;
     --run-id)
       RUN_ID="$2"; shift 2 ;;
+    --render-episodes)
+      RENDER_EPISODES="$2"; shift 2 ;;
     --dry-run)
       DRY_RUN="true"; shift ;;
     -h|--help)
@@ -89,7 +93,7 @@ run_one() {
   local out_dir="${OUTPUT_ROOT}/smolvla_libero_object_nas${nas}_${RUN_ID}"
 
   local cmd=(
-    env "LEROBOT_MAX_EPISODES_RENDERED=${LEROBOT_MAX_EPISODES_RENDERED:-0}"
+    env "LEROBOT_MAX_EPISODES_RENDERED=${RENDER_EPISODES}"
     ./run_smolvla_libero_eval.sh
     "--policy.path=${POLICY_PATH}"
     "--env.type=libero"

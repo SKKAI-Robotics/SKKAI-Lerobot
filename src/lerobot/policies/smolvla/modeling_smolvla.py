@@ -62,6 +62,13 @@ from torch import Tensor, nn
 
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.rtc.modeling_rtc import RTCProcessor
+from lerobot.policies.smolvla.FASTER import (
+    FASTERConfig,
+    build_inference_step_schedule,
+    build_model_timestep_input,
+    build_training_batch,
+    dispatch_mask,
+)
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
 from lerobot.policies.utils import (
@@ -75,26 +82,32 @@ class ActionSelectKwargs(TypedDict, total=False):
     inference_delay: int | None
     prev_chunk_left_over: Tensor | None
     execution_horizon: int | None
+    allow_partial_chunk_return: bool | None
 
 
 def create_sinusoidal_pos_embedding(
     time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"
 ) -> Tensor:
-    """Computes sine-cosine positional embedding vectors for scalar positions."""
+    """Computes sine-cosine positional embeddings for scalar or token-wise time."""
+    device = torch.device(device)
+
     if dimension % 2 != 0:
         raise ValueError(f"dimension ({dimension}) must be divisible by 2")
 
-    if time.ndim != 1:
-        raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
+    if time.ndim not in {1, 2}:
+        raise ValueError("The time tensor is expected to have shape `(batch_size,)` or `(batch_size, horizon)`.")
 
     dtype = get_safe_dtype(torch.float64, device.type)
     fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
     period = min_period * (max_period / min_period) ** fraction
 
-    # Compute the outer product
     scaling_factor = 1.0 / period * 2 * math.pi
-    sin_input = scaling_factor[None, :] * time[:, None]
-    pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    if time.ndim == 1:
+        sin_input = scaling_factor[None, :] * time[:, None]
+        pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    else:
+        sin_input = scaling_factor[None, None, :] * time[:, :, None]
+        pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=2)
     return pos_emb
 
 
@@ -375,27 +388,47 @@ class SmolVLAPolicy(PreTrainedPolicy):
         lang_masks = batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("actions_id_pad")
+        faster_training_mask = None
+
+        if self.model._use_faster_scheduler() and time is None:
+            faster_training_batch = build_training_batch(
+                batch_size=actions.shape[0],
+                config=self.model.faster_config,
+                device=actions.device,
+            )
+            time = faster_training_batch.local_time
+            faster_training_mask = faster_training_batch.mask
+
         loss_dict = {}
         losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
         loss_dict["losses_after_forward"] = losses.clone().mean().item()
-
-        if actions_is_pad is not None:
-            in_episode_bound = ~actions_is_pad
-            losses = losses * in_episode_bound.unsqueeze(-1)
-            loss_dict["losses_after_in_ep_bound"] = losses.clone().mean().item()
 
         # Remove padding
         losses = losses[:, :, : self.config.max_action_dim]
         loss_dict["losses_after_rm_padding"] = losses.clone().mean().item()
 
-        if reduction == "none":
-            # Return per-sample losses (B,) by averaging over time and action dims
+        if self.model._use_faster_scheduler() and faster_training_mask is not None:
+            valid_tokens = faster_training_mask
+            if actions_is_pad is not None:
+                valid_tokens = valid_tokens & (~actions_is_pad)
+
+            per_token_loss = losses.mean(dim=-1)
+            valid_weights = valid_tokens.to(dtype=per_token_loss.dtype)
+            per_sample_loss = (per_token_loss * valid_weights).sum(dim=1) / valid_weights.sum(dim=1).clamp_min(1.0)
+            loss_dict["losses_after_faster_mask"] = per_sample_loss.mean().item()
+        else:
+            if actions_is_pad is not None:
+                in_episode_bound = ~actions_is_pad
+                losses = losses * in_episode_bound.unsqueeze(-1)
+                loss_dict["losses_after_in_ep_bound"] = losses.clone().mean().item()
+
             per_sample_loss = losses.mean(dim=(1, 2))
+
+        if reduction == "none":
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
         else:
-            # Default: return scalar mean loss
-            loss = losses.mean()
+            loss = per_sample_loss.mean()
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
 
@@ -554,6 +587,14 @@ class VLAFlowMatching(nn.Module):
     def __init__(self, config: SmolVLAConfig, rtc_processor: RTCProcessor | None = None):
         super().__init__()
         self.config = config
+        self.faster_config = FASTERConfig(
+            prediction_horizon=self.config.chunk_size,
+            num_steps=self.config.num_steps,
+            first_action_hit_time=self.config.faster_first_action_hit_time,
+            alpha=self.config.faster_alpha,
+            mixed_schedule_probability=self.config.faster_mixed_schedule_probability,
+            max_delay=self.config.faster_max_delay,
+        )
 
         self.vlm_with_expert = SmolVLMWithExpertModel(
             model_id=self.config.vlm_model_name,
@@ -600,6 +641,9 @@ class VLAFlowMatching(nn.Module):
 
     def _rtc_enabled(self):
         return self.config.rtc_config is not None and self.config.rtc_config.enabled
+
+    def _use_faster_scheduler(self) -> bool:
+        return self.config.flow_matching_scheduler == "faster"
 
     def set_requires_grad(self):
         for params in self.state_proj.parameters():
@@ -736,7 +780,16 @@ class VLAFlowMatching(nn.Module):
         )
         time_emb = time_emb.type(dtype=dtype)
 
-        time_emb = time_emb[:, None, :].expand_as(action_emb)
+        if time_emb.ndim == 2:
+            time_emb = time_emb[:, None, :].expand_as(action_emb)
+        elif time_emb.ndim == 3:
+            if time_emb.shape[:2] != action_emb.shape[:2]:
+                raise ValueError(
+                    "Token-wise time embeddings must match action embeddings over batch and horizon. "
+                    f"Got {time_emb.shape[:2]} vs {action_emb.shape[:2]}."
+                )
+        else:
+            raise ValueError(f"Unsupported time embedding rank: {time_emb.ndim}")
         action_time_emb = torch.cat([action_emb, time_emb], dim=2)
 
         action_time_emb = self.action_time_mlp_in(action_time_emb)
@@ -768,7 +821,15 @@ class VLAFlowMatching(nn.Module):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
-        time_expanded = time[:, None, None]
+        if time.ndim == 1:
+            time_expanded = time[:, None, None]
+        elif time.ndim == 2:
+            time_expanded = time[:, :, None]
+        else:
+            raise ValueError(
+                "Flow-matching time must have shape `(batch_size,)` or `(batch_size, horizon)`. "
+                f"Got {time.shape}."
+            )
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
@@ -807,6 +868,38 @@ class VLAFlowMatching(nn.Module):
         **kwargs: Unpack[ActionSelectKwargs],
     ) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+        if self._use_faster_scheduler():
+            return self._sample_actions_faster(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                state,
+                noise=noise,
+                **kwargs,
+            )
+
+        return self._sample_actions_constant(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            state,
+            noise=noise,
+            **kwargs,
+        )
+
+    def _sample_actions_constant(
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        noise=None,
+        **kwargs: Unpack[ActionSelectKwargs],
+    ) -> Tensor:
+        """Original constant-timestep flow matching sampler."""
         bsize = state.shape[0]
         device = state.device
 
@@ -828,14 +921,26 @@ class VLAFlowMatching(nn.Module):
             use_cache=self.config.use_cache,
             fill_kv_cache=True,
         )
+        # Flow matching inference starts from pure noise x_1 and numerically integrates
+        # the learned velocity field v_t backward in time until it reaches x_0,
+        # which is interpreted as the predicted action chunk.
+        #
+        # This block is the denoising scheduler: it uses a constant timestep schedule
+        # rather than a separate scheduler class. Time is discretized uniformly from
+        # t=1 down to t=0, so each iteration advances by the same fixed delta `dt`.
         num_steps = self.config.num_steps
         dt = -1.0 / num_steps
 
         x_t = noise
         for step in range(num_steps):
+            # Current continuous-time point in the reverse integration.
+            # Example: with num_steps=10, time visits 1.0, 0.9, ..., 0.1.
             time = 1.0 + step * dt
             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
 
+            # Bind the current timestep into a callable that predicts the velocity v_t
+            # for an arbitrary state x_t. RTC can wrap/intercept this callable without
+            # duplicating the core denoising implementation.
             def denoise_step_partial_call(input_x_t, current_timestep=time_tensor):
                 return self.denoise_step(
                     x_t=input_x_t,
@@ -860,10 +965,94 @@ class VLAFlowMatching(nn.Module):
             else:
                 v_t = denoise_step_partial_call(x_t)
 
+            # Explicit Euler update for the flow ODE:
+            #   x_{t+dt} = x_t + dt * v_t
+            # Since dt < 0, this moves the sample from noisy x_1 toward clean x_0.
             x_t = x_t + dt * v_t
 
             if self.rtc_processor is not None and self.rtc_processor.is_debug_enabled():
                 self.rtc_processor.track(time=time, x_t=x_t, v_t=v_t)
+
+        # End of the constant-timestep denoising schedule. After the last step,
+        # x_t is the final action chunk returned to the policy caller.
+        return x_t
+
+    def _sample_actions_faster(
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        noise=None,
+        **kwargs: Unpack[ActionSelectKwargs],
+    ) -> Tensor:
+        """FASTER sampler using token-wise local timesteps on the non-RTC path."""
+        if self._rtc_enabled():
+            raise NotImplementedError("FASTER scheduler is not yet compatible with RTC in SmolVLA.")
+
+        bsize = state.shape[0]
+        device = state.device
+
+        if noise is None:
+            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, state=state
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        _, past_key_values = self.vlm_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=True,
+        )
+
+        inference_delay = int(kwargs.get("inference_delay") or 0)
+        execution_horizon = kwargs.get("execution_horizon") or self.config.n_action_steps
+        allow_partial_chunk_return = bool(kwargs.get("allow_partial_chunk_return"))
+
+        x_t = noise.clone()
+        for step in range(self.faster_config.num_steps):
+            schedule = build_inference_step_schedule(
+                step=step,
+                num_steps=self.faster_config.num_steps,
+                delay=inference_delay,
+                horizon=self.config.chunk_size,
+                alpha=self.faster_config.alpha,
+                first_action_hit_time=self.faster_config.first_action_hit_time,
+                device=device,
+            )
+            time_tensor = build_model_timestep_input(schedule.tau, bsize)
+
+            def denoise_step_partial_call(input_x_t, current_timestep=time_tensor):
+                return self.denoise_step(
+                    x_t=input_x_t,
+                    prefix_pad_masks=prefix_pad_masks,
+                    past_key_values=past_key_values,
+                    timestep=current_timestep,
+                )
+
+            v_t = denoise_step_partial_call(x_t)
+            x_t = x_t + schedule.delta_tau.to(dtype=x_t.dtype) * v_t
+
+            if self.rtc_processor is not None and self.rtc_processor.is_debug_enabled():
+                self.rtc_processor.track(
+                    time=schedule.rho,
+                    x_t=x_t,
+                    v_t=v_t,
+                    ready_tokens=dispatch_mask(schedule.tau, schedule.tau_next),
+                )
+
+            if allow_partial_chunk_return and torch.all(
+                schedule.tau_next[inference_delay : min(inference_delay + execution_horizon, self.config.chunk_size)]
+                <= 0
+            ):
+                break
 
         return x_t
 
